@@ -251,6 +251,33 @@ print(f"[category] value={scored.get_value()} category={scored.score_category}")
 #   a refusal, and whether the response is harmful. `WildGuardLabel` selects which judgement
 #   becomes the boolean; the other two are kept in the score metadata, so reading them costs no
 #   extra request. The prompt is read from the latest earlier user turn of the scored conversation.
+#   Only assistant turns are scored by default. For response-side labels, blank text pieces are
+#   skipped when other supported pieces have content; an entirely blank response raises an error.
+#   `HARMFUL_REQUEST` also accepts an empty response.
+#
+# WildGuard's bundled prompt includes the full
+# [AI2 completion wrapper](https://github.com/allenai/wildguard/blob/main/wildguard/utils.py).
+# Serve `allenai/wildguard` through an OpenAI-compatible **completions** endpoint, then configure:
+#
+# ```python
+# from pyrit.prompt_target import OpenAICompletionTarget
+# from pyrit.score import WildGuardScorer
+#
+# target = OpenAICompletionTarget(
+#     model_name="allenai/wildguard",
+#     endpoint="http://localhost:8000/v1",  # Your WildGuard completion server
+#     api_key="your-server-key",  # Use the authentication required by your server
+#     max_tokens=128,
+#     temperature=0,
+# )
+# scorer = WildGuardScorer(chat_target=target, user_prompt="The original user request")
+# scores = await scorer.score_text_async("The model response")
+# ```
+#
+# The checkpoint does not supply a tokenizer chat template, so
+# `HuggingFaceChatTarget(model_id="allenai/wildguard")` is not a drop-in alternative.
+# Do not apply a second chat wrapper to the bundled prompt. If using a chat server that
+# supplies its own formatting, pass a matching `prompt_template` explicitly.
 #
 # All five need their respective endpoints/credentials even though they are not "self-ask".
 # %% [markdown]

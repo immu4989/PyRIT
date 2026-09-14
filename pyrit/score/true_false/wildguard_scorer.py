@@ -8,9 +8,10 @@ from functools import partial
 from typing import Any, ClassVar
 
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
-from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score, SeedPrompt
-from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
+from pyrit.models import ComponentIdentifier, ContentScorable, Message, MessagePiece, Score, SeedPrompt
+from pyrit.prompt_target import PromptTarget, TargetRequirements
 from pyrit.score.llm_scoring import _run_llm_scoring_async
+from pyrit.score.message_scorable_resolver import MessageScorableResolver
 from pyrit.score.response_handler import CallableResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.system_prompt import _render_system_prompt_template
@@ -91,12 +92,25 @@ def render_wildguard_prompt(
     Returns:
         SeedPrompt: The rendered request prompt.
     """
-    return _render_system_prompt_template(
+    rendered = _render_system_prompt_template(
         system_prompt_template=prompt_template,
         default_template_path=_DEFAULT_WILDGUARD_PROMPT_PATH,
         render_params={"user_prompt": user_prompt, "response": response},
         required_parameters=_PROMPT_PARAMETERS,
     )
+    # SeedPrompt's Jinja rendering drops the trailing newline. WildGuard's official
+    # generation prefix ends with one, so preserve it on the completion request.
+    return rendered.model_copy(update={"value": rendered.value.rstrip("\n") + "\n"})
+
+
+class _WildGuardMessageResolver(MessageScorableResolver):
+    """Treat role-free content as a model response without relabeling stored turns."""
+
+    @staticmethod
+    def _adapt_content(*, scorable: ContentScorable) -> Message:
+        message = MessageScorableResolver._adapt_content(scorable=scorable)
+        message.get_piece().role = "assistant"
+        return message
 
 
 class WildGuardScorer(MessageTrueFalseScorer):
@@ -115,12 +129,23 @@ class WildGuardScorer(MessageTrueFalseScorer):
 
     The scored message is the model response. The prompt it is judged against is read from the
     latest earlier user turn of the scored conversation, or supplied with ``user_prompt``.
+
+    The default template includes AI2's full completion wrapper. Use a raw completion
+    endpoint serving ``allenai/wildguard``, such as ``OpenAICompletionTarget``. A chat
+    endpoint must not apply another wrapper; supply a matching ``prompt_template`` if
+    the server already formats requests. The checkpoint has no default tokenizer chat
+    template, so ``HuggingFaceChatTarget`` is not a drop-in deployment.
     """
 
     SCORE_CATEGORY: ClassVar[str] = "wildguard"
-    TARGET_REQUIREMENTS = CHAT_TARGET_REQUIREMENTS
+    TARGET_REQUIREMENTS = TargetRequirements(
+        required_input_modalities=frozenset({frozenset({"text"})}),
+        required_output_modalities=frozenset({frozenset({"text"})}),
+    )
 
-    _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(supported_data_types=["text"])
+    _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(
+        supported_data_types=["text"], supported_roles=["assistant"]
+    )
 
     def __init__(
         self,
@@ -136,7 +161,8 @@ class WildGuardScorer(MessageTrueFalseScorer):
         Initialize the WildGuard scorer.
 
         Args:
-            chat_target (PromptTarget): A target serving WildGuard.
+            chat_target (PromptTarget): A target serving WildGuard. The default prompt is
+                fully wrapped for a raw completion endpoint, not a chat-template endpoint.
             label (WildGuardLabel | str): Which of the three judgements becomes the score
                 value, as the enum or its value such as ``"Harmful request"``, which is what a
                 serialized configuration supplies. Defaults to
@@ -146,7 +172,8 @@ class WildGuardScorer(MessageTrueFalseScorer):
                 to None.
             prompt_template (SeedPrompt | str | None): Custom WildGuard request template.
                 Defaults to the bundled template.
-            validator (ScorerPromptValidator | None): Custom validator. Defaults to text only.
+            validator (ScorerPromptValidator | None): Custom validator. Defaults to assistant
+                text only; simulated assistant turns are excluded unless explicitly enabled.
             score_aggregator (TrueFalseAggregatorFunc): Aggregator for multi-piece scores.
                 Defaults to TrueFalseScoreAggregator.OR.
 
@@ -164,6 +191,7 @@ class WildGuardScorer(MessageTrueFalseScorer):
             validator=validator or self._DEFAULT_VALIDATOR,
             score_aggregator=score_aggregator,
             chat_target=chat_target,
+            message_resolver=_WildGuardMessageResolver(),
         )
 
     def _build_identifier(self) -> ComponentIdentifier:
@@ -241,15 +269,9 @@ class WildGuardScorer(MessageTrueFalseScorer):
             list[Score]: A single true/false WildGuard score.
 
         Raises:
-            ValueError: If no user prompt can be found, or if a response-side label was
-                selected for an empty response.
+            ValueError: If no user prompt can be found.
         """
         response = message_piece.converted_value
-        if not response.strip() and self._label is not WildGuardLabel.HARMFUL_REQUEST:
-            # Checked before the request rather than in the parser, because the parser's
-            # exceptions drive a retry and resending an empty response cannot change the answer.
-            raise ValueError(_EMPTY_RESPONSE_MESSAGE)
-
         user_prompt = _RESOLVED_USER_PROMPT.get()
         if not user_prompt:
             raise ValueError(_MISSING_USER_PROMPT_MESSAGE)
@@ -298,10 +320,22 @@ class WildGuardScorer(MessageTrueFalseScorer):
         Returns:
             list[Score]: A single aggregated true/false score, or an empty list when no piece
                 could be scored.
+
+        Raises:
+            ValueError: If every supported piece is empty for a response-side label.
         """
-        token = _RESOLVED_USER_PROMPT.set(await self._resolve_user_prompt_async(message.get_piece()))
+        pieces = self._get_supported_pieces(message)
+        if not pieces:
+            return []
+        if self._label is not WildGuardLabel.HARMFUL_REQUEST:
+            pieces = [piece for piece in pieces if piece.converted_value.strip()]
+            if not pieces:
+                raise ValueError(_EMPTY_RESPONSE_MESSAGE)
+        # Filter before starting any piece tasks, without modifying the stored message.
+        scoring_message = Message(message_pieces=pieces)
+        token = _RESOLVED_USER_PROMPT.set(await self._resolve_user_prompt_async(pieces[0]))
         try:
-            scores = await super()._score_async(message, objective=objective)
+            scores = await super()._score_async(scoring_message, objective=objective)
         finally:
             _RESOLVED_USER_PROMPT.reset(token)
 
