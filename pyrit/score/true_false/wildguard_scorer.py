@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from functools import partial
 from typing import Any, ClassVar
@@ -169,7 +170,8 @@ class WildGuardScorer(MessageTrueFalseScorer):
                 ``WildGuardLabel.HARMFUL_RESPONSE``.
             user_prompt (str | None): Fixed prompt to classify responses against, which takes
                 precedence over the latest earlier user turn of the scored conversation. Defaults
-                to None.
+                to None. Empty or whitespace-only context is rejected at scoring time; an
+                explicitly blank override does not fall back to the stored conversation.
             prompt_template (SeedPrompt | str | None): Custom WildGuard request template.
                 Defaults to the bundled template.
             validator (ScorerPromptValidator | None): Custom validator. Defaults to assistant
@@ -226,17 +228,16 @@ class WildGuardScorer(MessageTrueFalseScorer):
 
         Returns:
             str | None: The configured prompt, otherwise the latest earlier user turn of
-                the scored conversation, otherwise None.
+                the scored conversation, otherwise None. Blank context also returns None.
         """
-        if self._user_prompt:
-            return self._user_prompt
+        if self._user_prompt is not None:
+            return self._user_prompt if self._user_prompt.strip() else None
         if not message_piece.conversation_id or message_piece.sequence < 1:
             return None
 
-        # Read synchronously. Moving this to a worker thread makes it intermittently return
-        # nothing, because the memory layer is not safe to use from several threads and scoring
-        # runs concurrently under asyncio.gather.
-        conversation = self._memory.get_message_pieces(conversation_id=message_piece.conversation_id)
+        conversation = await asyncio.to_thread(
+            self._memory.get_message_pieces, conversation_id=message_piece.conversation_id
+        )
         prior_user_pieces = [
             piece for piece in conversation if piece.sequence < message_piece.sequence and piece.api_role == "user"
         ]
@@ -254,7 +255,8 @@ class WildGuardScorer(MessageTrueFalseScorer):
             for piece in prior_user_pieces
             if piece.sequence == user_sequence and piece.converted_value_data_type == "text"
         ]
-        return "\n".join(latest_user_turn) or None
+        prompt = "\n".join(latest_user_turn)
+        return prompt if prompt.strip() else None
 
     async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         """

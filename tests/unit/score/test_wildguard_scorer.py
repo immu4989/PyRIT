@@ -3,6 +3,8 @@
 
 """Tests for ``WildGuardScorer``."""
 
+import asyncio
+import threading
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +19,85 @@ from pyrit.prompt_target import OpenAICompletionTarget, PromptTarget, TargetCapa
 from pyrit.score import MessageScorable, WildGuardLabel, WildGuardScorer, render_wildguard_prompt
 
 FULL_RESPONSE = "Harmful request: yes\nResponse refusal: no\nHarmful response: yes"
+
+
+@pytest.mark.parametrize("prompt", ["", "   ", "\n\t"])
+@pytest.mark.parametrize("configured", [False, True])
+async def test_blank_user_prompt_rejected_before_inference(
+    sqlite_instance: MemoryInterface, prompt: str, configured: bool
+) -> None:
+    answer = _stored_exchange(
+        sqlite_instance, prompt="valid stored prompt" if configured else prompt, response="a response"
+    )
+    target = _mock_target(FULL_RESPONSE)
+    scorer = WildGuardScorer(chat_target=target, user_prompt=prompt if configured else None)
+
+    with pytest.raises(RuntimeError, match="needs the prompt"):
+        await scorer.score_async(scorable=MessageScorable.from_message(answer))
+
+    target.send_prompt_async.assert_not_called()
+
+
+async def test_blank_latest_user_turn_does_not_fall_back(sqlite_instance: MemoryInterface) -> None:
+    earlier = _stored_exchange(sqlite_instance, prompt="older valid request", response="older response")
+    conversation_id = earlier.get_piece().conversation_id
+    sqlite_instance.add_message_to_memory(
+        request=Message(
+            message_pieces=[
+                MessagePiece(
+                    role="user",
+                    original_value="original text",
+                    converted_value=value,
+                    conversation_id=conversation_id,
+                )
+                for value in ["  ", "\n\t"]
+            ]
+        )
+    )
+    answer = _turn(role="assistant", text="a response", conversation_id=conversation_id)
+    sqlite_instance.add_message_to_memory(request=answer)
+    target = _mock_target(FULL_RESPONSE)
+
+    with pytest.raises(RuntimeError, match="needs the prompt"):
+        await WildGuardScorer(chat_target=target).score_async(scorable=MessageScorable.from_message(answer))
+
+    target.send_prompt_async.assert_not_called()
+
+
+async def test_concurrent_prompt_lookups_run_off_event_loop(sqlite_instance: MemoryInterface) -> None:
+    answer = _stored_exchange(sqlite_instance, prompt="  valid context\n", response="a response")
+    scorer = WildGuardScorer(chat_target=_mock_target(FULL_RESPONSE))
+    loop_thread = threading.get_ident()
+    read = sqlite_instance.get_message_pieces
+
+    def checked_read(*, conversation_id: str) -> list[MessagePiece]:
+        assert threading.get_ident() != loop_thread
+        return read(conversation_id=conversation_id)
+
+    with patch.object(sqlite_instance, "get_message_pieces", side_effect=checked_read) as lookup:
+        prompts = await asyncio.gather(*(scorer._resolve_user_prompt_async(answer.get_piece()) for _ in range(100)))
+
+    assert prompts == ["  valid context\n"] * 100
+    assert lookup.call_count == 100
+
+
+async def test_concurrent_scoring_preserves_each_messages_context(sqlite_instance: MemoryInterface) -> None:
+    target = _mock_target(FULL_RESPONSE)
+    scorer = WildGuardScorer(chat_target=target)
+    answers = [
+        _stored_exchange(sqlite_instance, prompt=f"question {index}", response=f"answer {index}") for index in range(20)
+    ]
+
+    results = await asyncio.gather(
+        *(scorer.score_async(scorable=MessageScorable.from_message(answer)) for answer in answers)
+    )
+
+    assert all(len(scores) == 1 and scores[0].get_value() is True for scores in results)
+    requests = [call.kwargs["message"].get_piece().converted_value for call in target.send_prompt_async.call_args_list]
+    assert set(requests) == {
+        render_wildguard_prompt(user_prompt=f"question {index}", response=f"answer {index}").value
+        for index in range(20)
+    }
 
 
 def _mock_target(response_text: str) -> MagicMock:
