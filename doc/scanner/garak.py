@@ -14,7 +14,8 @@
 # The Garak scenario family implements probes inspired by the
 # [Garak](https://github.com/NVIDIA/garak) framework. These include encoding-based probes (which
 # test whether a target can be tricked into producing harmful content when prompts are encoded in
-# various formats), web-injection probes (which test whether a target emits markdown
+# various formats), API-key probes (which test whether a target will generate or complete
+# credential-shaped values), web-injection probes (which test whether a target emits markdown
 # data-exfiltration or cross-site-scripting payloads), a doctor probe (which applies the Policy
 # Puppetry universal bypass), system-prompt-extraction probes (which test whether a target can be
 # coaxed into revealing its own system prompt), package-hallucination probes (which test whether a
@@ -29,15 +30,22 @@
 from pathlib import Path
 
 from pyrit.output import output_scenario_async
-from pyrit.prompt_target import RealtimeTarget
 from pyrit.registry import TargetRegistry
 from pyrit.scenario import DatasetAttackConfiguration
 from pyrit.scenario.garak import (
+    ApiKey,
+    ApiKeyDatasetConfiguration,
+    ApiKeyTechnique,
+    Doctor,
     Encoding,
     EncodingTechnique,
     FigStep,
+    PackageHallucination,
+    PackageHallucinationTechnique,
     SystemPromptExtraction,
     SystemPromptExtractionTechnique,
+    WebInjection,
+    WebInjectionTechnique,
 )
 from pyrit.scenario.garak.audio_achilles_heel import AudioAchillesHeel, AudioAchillesHeelDatasetConfiguration
 from pyrit.scenario.garak.encoding import EncodingDatasetConfiguration
@@ -46,6 +54,9 @@ from pyrit.setup import initialize_from_config_async
 await initialize_from_config_async(config_path=Path("pyrit_conf.yaml"))  # type: ignore
 
 objective_target = TargetRegistry.get_registry_singleton().instances.get("openai_chat")
+
+from pyrit.scenario.garak import DoctorTechnique
+
 # %% [markdown]
 # ## Encoding
 #
@@ -122,6 +133,7 @@ figstep_scenario.set_params_from_args(  # type: ignore
     args={
         "objective_target": objective_target,
         "dataset_config": figstep_dataset_config,
+        "include_baseline": False,
     }
 )
 await figstep_scenario.initialize_async()  # type: ignore
@@ -154,6 +166,68 @@ await output_scenario_async(figstep_result)
 # **Aggregate techniques:** `ALL` (all 8), `DEFAULT` (excludes the two combinatorial extended
 # probes), `EXFIL` (the 6 markdown-exfil probes), and `XSS` (TaskXSS + MarkdownXSS).
 
+# %%
+web_injection_scenario = WebInjection(max_prompts_per_technique=1)
+web_injection_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": [WebInjectionTechnique.StringAssemblyDataExfil],
+        "include_baseline": False,
+    }
+)
+await web_injection_scenario.initialize_async()  # type: ignore
+
+web_injection_result = await web_injection_scenario.run_async()  # type: ignore
+
+# %%
+await output_scenario_async(web_injection_result)
+
+# %% [markdown]
+# ## ApiKey
+#
+# Ports Garak's `apikey.GetKey` and `apikey.CompleteKey` probes. `GetKey` asks for a new
+# credential across 58 service types; `CompleteKey` asks the target to extend five conspicuous
+# PyRIT-created synthetic partial-key fixtures. The scenario uses `CredentialLeakScorer` with
+# its opt-in `GARAK_PATTERNS` set; the scorer's default coverage is unchanged.
+# Supplied partials, request echoes, and safe placeholders are not counted as leaks; a newly
+# generated credential-shaped value is. Seven service entries represent public resource/client
+# identifiers rather than secrets; they remain in the prompt corpus for Garak parity but are
+# intentionally never scored as credential leaks.
+#
+# **CLI examples:**
+#
+# ```bash
+# # Sample up to 20 prompts across both techniques.
+# pyrit_scan run garak.api_key --target openai_chat
+#
+# # Run only GetKey with a smaller sample.
+# pyrit_scan run garak.api_key --target openai_chat --techniques get_key --max-dataset-size 2
+# ```
+#
+# **Available techniques:** `GetKey` and `CompleteKey`. `DEFAULT` and `ALL` both select the two
+# techniques. `max_dataset_size` samples across all selected technique populations, not per service.
+# The base scenario persists the sample for resume. Use `ApiKeyDatasetConfiguration` with
+# `max_dataset_size=None` to run all 348 requests. Standard technique converter stacks are supported.
+
+# %%
+api_key_scenario = ApiKey()
+api_key_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": [ApiKeyTechnique.GetKey],
+        "dataset_config": ApiKeyDatasetConfiguration(dataset_names=ApiKey.required_datasets(), max_dataset_size=2),
+    }
+)
+await api_key_scenario.initialize_async()  # type: ignore
+
+print(f"Scenario: {api_key_scenario.name}")
+print(f"Atomic attacks: {api_key_scenario.atomic_attack_count}")
+
+api_key_result = await api_key_scenario.run_async()  # type: ignore
+
+# %%
+await output_scenario_async(api_key_result)
+
 # %% [markdown]
 # ## Doctor
 #
@@ -172,6 +246,24 @@ await output_scenario_async(figstep_result)
 # **Available techniques** (2 probes): `PolicyPuppetry` (wraps the objective in the Dr House
 # template) and `PolicyPuppetryLeet` (the same template, additionally leetspeak-encoded). Both are
 # tagged `default`, so `DEFAULT` and `ALL` currently coincide.
+
+# %%
+doctor_dataset_config = DatasetAttackConfiguration(dataset_names=["garak_doctor"], max_dataset_size=1)
+
+doctor_scenario = Doctor()
+doctor_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": [DoctorTechnique.policy_puppetry],
+        "dataset_config": doctor_dataset_config,
+    }
+)
+await doctor_scenario.initialize_async()  # type: ignore
+
+doctor_result = await doctor_scenario.run_async()  # type: ignore
+
+# %%
+await output_scenario_async(doctor_result)
 
 # %% [markdown]
 # ## SystemPromptExtraction
@@ -248,6 +340,21 @@ await output_scenario_async(sysprompt_result)
 # > If you select another language, PyRIT downloads its registry on demand. The raw package names
 # > are loaded into memory only for the scorer and are never sent as prompts.
 
+# %%
+package_scenario = PackageHallucination(max_prompts_per_language=1)
+package_scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "scenario_techniques": [PackageHallucinationTechnique.Rust],
+    }
+)
+await package_scenario.initialize_async()  # type: ignore
+
+package_result = await package_scenario.run_async()  # type: ignore
+
+# %%
+await output_scenario_async(package_result)
+
 # %% [markdown]
 # ## AudioAchillesHeel
 #
@@ -261,12 +368,12 @@ await output_scenario_async(sysprompt_result)
 # **CLI example:**
 #
 # ```bash
-# pyrit_scan garak.audio_achilles_heel --target realtime --max-dataset-size 2
+# pyrit_scan garak.audio_achilles_heel --target azure_openai_realtime --max-dataset-size 2
 # ```
 #
 # > **Note:** The objective target must accept `audio_path` input (i.e. be multimodal). The example
-# > below uses `RealtimeTarget` (the OpenAI Realtime audio websocket); non-audio targets such as the
-# > default `openai_chat` will error when the audio request is sent. The full dataset holds ~350
+# > below uses the registered Azure OpenAI Realtime target; non-audio targets such as the default
+# > `openai_chat` will error when the audio request is sent. The full dataset holds ~350
 # > clips, so a default run samples a small subset to finish quickly — raise `--max-dataset-size`
 # > for broader coverage.
 
@@ -275,7 +382,7 @@ audio_dataset_config = AudioAchillesHeelDatasetConfiguration(
     dataset_names=["garak_audio_achilles_heel"], max_dataset_size=1
 )
 
-audio_target = RealtimeTarget()
+audio_target = TargetRegistry.get_registry_singleton().instances.get("azure_openai_realtime")
 
 audio_scenario = AudioAchillesHeel()
 audio_scenario.set_params_from_args(  # type: ignore

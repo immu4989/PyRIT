@@ -14,6 +14,10 @@ export interface MessageAttachment {
    */
   size?: number
   file?: File
+  /** Raw backend value used when reconstructing a persisted attachment for resubmission. */
+  sourceValue?: string
+  /** Backend data type paired with sourceValue so persisted attachments retain their original semantics. */
+  sourceDataType?: string
   /** Backend piece ID — preserved so remix/copy can trace back to the original piece */
   pieceId?: string
   /** Backend prompt_metadata — preserved so video_id etc. carry over on remix/copy */
@@ -74,6 +78,11 @@ export interface Message {
 export interface MessageError {
   type: string // e.g. 'blocked', 'processing', 'empty', 'unknown'
   description?: string
+}
+
+export interface ChatSendOutcome {
+  status: 'sent' | 'retryable_failure' | 'non_retryable_failure'
+  clearDraft: boolean
 }
 
 // ============================================================================
@@ -233,10 +242,18 @@ export interface ConverterIdentifier {
 export interface ConverterInstance {
   converter_id: string
   identifier: ConverterIdentifier
+  is_llm_based?: boolean
+  description?: string | null
 }
 
 export interface ConverterListResponse {
   items: ConverterInstance[]
+}
+
+export interface CreateConverterRequest {
+  name?: string
+  type: string
+  params?: Record<string, unknown>
 }
 
 export interface Parameter {
@@ -247,10 +264,11 @@ export interface Parameter {
   default?: string | string[] | null
   choices?: string[] | null
   is_list?: boolean
+  reference_type?: 'target' | 'converter' | 'scorer' | 'scenario' | null
   description?: string | null
 }
 
-export interface ConverterCatalogEntry {
+export interface ConverterTypeEntry {
   converter_type: string
   supported_input_types: string[]
   supported_output_types: string[]
@@ -259,9 +277,13 @@ export interface ConverterCatalogEntry {
   description?: string | null
 }
 
-export interface ConverterCatalogResponse {
-  items: ConverterCatalogEntry[]
+export interface ConverterTypeListResponse {
+  items: ConverterTypeEntry[]
 }
+
+/** Temporary compatibility names used by the existing chat converter panel. */
+export type ConverterCatalogEntry = ConverterTypeEntry
+export type ConverterCatalogResponse = ConverterTypeListResponse
 
 export interface TargetCatalogEntry {
   target_type: string
@@ -294,6 +316,8 @@ export type AttackTargetResolutionStatus =
   | 'error'
   | 'legacy'
 
+export type AttackOutcome = 'undetermined' | 'success' | 'failure' | 'error'
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string
@@ -302,10 +326,21 @@ export interface AttackSummary {
   objective: string
   target?: TargetInfo | null
   converters: string[]
-  outcome?: 'undetermined' | 'success' | 'failure' | 'error' | null
+  outcome?: AttackOutcome | null
+  automated_score?: BackendScore | null
+  human_score?: BackendScore | null
+  last_score?: BackendScore | null
+  last_response?: BackendMessagePiece | null
   last_message_preview?: string | null
   message_count: number
   related_conversation_ids: string[]
+  operator?: string | null
+  operation?: string | null
+  related_conversations?: Array<{
+    conversation_id: string
+    conversation_type: 'adversarial' | 'preparation' | 'pruned' | 'score' | 'converter'
+    description?: string | null
+  }>
   labels: Record<string, string>
   created_at: string
   updated_at: string
@@ -314,11 +349,18 @@ export interface AttackSummary {
 export interface CreateAttackRequest {
   target_registry_name: string
   name?: string
+  operator?: string
+  operation?: string
   labels?: Record<string, string>
   source_conversation_id?: string
   cutoff_index?: number
   system_prompt?: string
   prepended_conversation?: PrependedMessageRequest[]
+}
+
+export interface UpdateAttackRequest {
+  outcome?: 'undetermined' | 'success' | 'failure' | 'error'
+  objective?: string
 }
 
 export interface CreateAttackResponse {
@@ -334,6 +376,7 @@ export interface BackendScore {
   id: string
   message_piece_id: string
   scorer_type: string
+  scorer_class_identifier?: ComponentIdentifier | null
   score_type: string
   score_value?: string | null
   status?: string
@@ -341,6 +384,30 @@ export interface BackendScore {
   score_category?: string[] | null
   score_rationale?: string | null
   timestamp: string
+}
+
+export type PromptResponseError = 'blocked' | 'none' | 'processing' | 'empty' | 'unknown'
+
+export interface ComponentIdentifier {
+  class_name: string
+  class_module: string
+  hash: string
+  eval_hash?: string | null
+  pyrit_version?: string
+  children?: Record<string, ComponentIdentifier | ComponentIdentifier[]>
+  attributes?: Record<string, unknown>
+  [parameter: string]: unknown
+}
+
+export interface ManualScoreInput {
+  value: boolean
+  rationale: string
+  update_attack: boolean
+}
+
+export type ManualScoreRequest = ManualScoreInput & {
+  attack_result_id: string
+  message_id: string
 }
 
 /** Score enriched with message-piece presentation fields for transcript rendering. */
@@ -363,8 +430,9 @@ export interface BackendMessagePiece {
   original_filename?: string | null
   converted_filename?: string | null
   prompt_metadata?: Record<string, unknown> | null
+  converter_identifiers?: Array<Record<string, unknown>>
   scores: BackendScore[]
-  response_error: string // 'none' | 'blocked' | 'processing' | 'empty' | 'unknown'
+  response_error: PromptResponseError
   response_error_description?: string | null
 }
 
@@ -375,9 +443,16 @@ export interface BackendMessage {
   created_at: string
 }
 
+export interface TargetResponseStatus {
+  response_error: PromptResponseError
+  request_turn_number: number
+  response_turn_number: number
+}
+
 export interface ConversationMessagesResponse {
   conversation_id: string
   messages: BackendMessage[]
+  target_response_status: TargetResponseStatus | null
 }
 
 export interface MessagePieceRequest {
@@ -401,7 +476,13 @@ export interface AddMessageRequest {
   target_registry_name?: string
   converter_ids?: string[]
   target_conversation_id: string
-  labels?: Record<string, string>
+}
+
+export interface LabelOptionsResponse {
+  source: string
+  operators?: string[]
+  operations?: string[]
+  labels: Record<string, string[]>
 }
 
 export interface AddMessageResponse {
@@ -640,7 +721,7 @@ export interface AttackRetrySummary {
   retries: RetryEvent[]
 }
 
-export type ScenarioRunState = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+export type ScenarioRunState = 'CREATED' | 'QUEUED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
 export interface ScenarioRunSummary {
   scenario_result_id: string
@@ -661,6 +742,53 @@ export interface ScenarioRunSummary {
   total_retries: number
   labels: Record<string, string>
   completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  planned_total_available?: boolean
+  successful_attacks?: number
+  error_attacks?: number
+  attack_details_available?: boolean
+}
+
+export interface ScenarioTargetSummary {
+  target_type: string
+  endpoint?: string | null
+  model_name?: string | null
+  identifier_hash?: string | null
+}
+
+export interface ScenarioRunListItem {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name?: string | null
+  scenario_version: number
+  status: ScenarioRunState
+  created_at: string
+  updated_at: string
+  error?: string | null
+  error_type?: string | null
+  techniques_used: string[]
+  total_attacks: number | null
+  completed_attacks: number
+  objective_achieved_rate: number
+  total_retries: number
+  labels: Record<string, string>
+  completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used: string[]
+  scenario_parameters: Record<string, unknown>
+  planned_total_available: boolean
+  successful_attacks: number
+  error_attacks: number
+  attack_details_available: boolean
+}
+
+export interface ScenarioRunListResponse {
+  items: ScenarioRunListItem[]
+  pagination: PaginationInfo
 }
 
 /** Compact persisted run header returned by the progress endpoint. */
@@ -672,11 +800,42 @@ export interface ScenarioProgressHeader {
   status: ScenarioRunState
   created_at: string
   completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  techniques_used?: string[]
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  labels?: Record<string, string>
 }
 
 /** One persisted attack attempt in ascending progress order. */
+export interface ScenarioProgressScore {
+  scorer_name: string
+  score_type: 'true_false' | 'float_scale' | 'unknown'
+  status: 'complete' | 'undetermined'
+  score_value?: string | null
+  score_rationale?: string | null
+}
+
+export type ScenarioIdentityValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ScenarioIdentityValue[]
+  | { [key: string]: ScenarioIdentityValue }
+
+export interface ScenarioComponentIdentity {
+  component_name: string
+  parameters: Record<string, ScenarioIdentityValue>
+  children: Record<string, ScenarioComponentIdentity[]>
+}
+
+export type ScenarioAttackTechniqueDetails = ScenarioComponentIdentity
+
 export interface ScenarioProgressResult {
   attack_result_id: string
+  conversation_id: string
   atomic_group_id: string
   atomic_attack_name: string
   seed_group_id: string
@@ -687,20 +846,33 @@ export interface ScenarioProgressResult {
   retries: RetryEvent[]
   error_type?: string | null
   error_message?: string | null
+  score?: ScenarioProgressScore | null
 }
 
 export interface ScenarioRunPlanSeedGroup {
   id: string
   objective_sha256: string
   objective: string
+  prompts: ScenarioRunPlanSeedPrompt[]
+}
+
+export interface ScenarioRunPlanSeedPrompt {
+  value: string
+  data_type?: string | null
+  role?: string | null
+  sequence: number
+  parameters: string[]
 }
 
 export interface ScenarioRunPlanAtomicGroup {
   id: string
   atomic_attack_name: string
   display_group: string
+  technique_name?: string | null
   technique_eval_hash: string
   seed_group_ids: string[]
+  description?: string | null
+  tags: string[]
 }
 
 export interface ScenarioRunPlan {
@@ -710,12 +882,74 @@ export interface ScenarioRunPlan {
   seed_groups: ScenarioRunPlanSeedGroup[]
 }
 
+export interface ScenarioProgressCounts {
+  completed: number
+  planned: number | null
+  succeeded: number
+  success_percentage: number | null
+  errors: number
+  retries: number
+}
+
+export interface ScenarioTechniqueProgress extends ScenarioProgressCounts {
+  id: string
+  display_group: string
+  atomic_attack_names: string[]
+  atomic_group_ids: string[]
+  description?: string | null
+  tags: string[]
+}
+
+export interface ScenarioDisplayGroupProgress extends ScenarioProgressCounts {
+  id: string
+  display_group: string
+  atomic_attack_names: string[]
+  atomic_group_ids: string[]
+}
+
+export interface ScenarioSeedGroupProgress extends ScenarioProgressCounts {
+  id: string
+  objective?: string | null
+}
+
+export interface ScenarioAtomicGroupProgress extends ScenarioProgressCounts {
+  id: string
+  atomic_attack_name: string
+  display_group: string
+  status: 'RUNNING' | 'PENDING' | 'INCOMPLETE' | 'COMPLETED'
+  technique_details?: ScenarioAttackTechniqueDetails | null
+}
+
+export interface ScenarioObjectiveScorerMetrics {
+  accuracy: number
+  accuracy_standard_error?: number | null
+  f1_score?: number | null
+  precision?: number | null
+  recall?: number | null
+  average_score_time_seconds?: number | null
+}
+
+export type ScenarioScorerIdentity = ScenarioComponentIdentity
+
+export interface ScenarioObjectiveScorer extends ScenarioScorerIdentity {
+  metrics?: ScenarioObjectiveScorerMetrics | null
+}
+
+export interface ScenarioProgressSummary {
+  overall: ScenarioProgressCounts
+  objective_scorer?: ScenarioObjectiveScorer | null
+  display_groups?: ScenarioDisplayGroupProgress[]
+  techniques: ScenarioTechniqueProgress[]
+  seed_groups: ScenarioSeedGroupProgress[]
+  atomic_groups: ScenarioAtomicGroupProgress[]
+  unattributed_attempts?: number
+}
+
 export interface ScenarioRunProgress {
   run: ScenarioProgressHeader
   plan: ScenarioRunPlan | null
-  reset: boolean
-  active_atomic_group_ids: string[]
   results: ScenarioProgressResult[]
+  summary: ScenarioProgressSummary
   next_cursor?: string | null
   has_more: boolean
   plan_complete: boolean

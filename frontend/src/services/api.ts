@@ -7,14 +7,17 @@ import type {
   TargetListResponse,
   TargetCatalogResponse,
   ConverterCatalogResponse,
+  ConverterTypeListResponse,
   ConverterInstance,
   ConverterListResponse,
+  CreateConverterRequest,
   CreateTargetRequest,
   InitializerSettingsResponse,
   ListRegisteredInitializersResponse,
   CustomInitializerListResponse,
   RegisterInitializerRequest,
   CreateAttackRequest,
+  LabelOptionsResponse,
   CreateAttackResponse,
   AttackSummary,
   AttackListResponse,
@@ -31,13 +34,18 @@ import type {
   ScenarioRunSizeEstimateResponse,
   ScenarioRunSizeEstimateRequest,
   ScenarioRunSummary,
+  ScenarioRunListResponse,
   ScenarioRunProgress,
+  ScenarioRunState,
   ConfigurationFileContent,
   EnvironmentFileContent,
   UpdateEnvironmentFileRequest,
   EnvironmentFileListResponse,
   UpdateConfigurationFileRequest,
   AuthAccess,
+  BackendScore,
+  ManualScoreRequest,
+  UpdateAttackRequest,
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
@@ -225,6 +233,11 @@ export const convertersApi = {
     return response.data
   },
 
+  listConverterTypes: async (): Promise<ConverterTypeListResponse> => {
+    const response = await apiClient.get('/converters/types')
+    return response.data
+  },
+
   listConverters: async (): Promise<ConverterListResponse> => {
     const response = await apiClient.get('/converters')
     return response.data
@@ -235,9 +248,13 @@ export const convertersApi = {
     return response.data
   },
 
-  createConverter: async (request: { type: string; params?: Record<string, unknown> }): Promise<{ converter_id: string; converter_type: string }> => {
+  createConverter: async (request: CreateConverterRequest): Promise<ConverterInstance> => {
     const response = await apiClient.post('/converters', request)
     return response.data
+  },
+
+  deleteConverter: async (converterId: string): Promise<void> => {
+    await apiClient.delete(`/converters/${encodeURIComponent(converterId)}`)
   },
 
   previewConversion: async (request: { original_value: string; converter_ids: string[]; original_value_data_type?: string }): Promise<{ converted_value: string; converted_value_data_type?: string }> => {
@@ -280,6 +297,18 @@ export const attacksApi = {
 
   getAttack: async (attackResultId: string): Promise<AttackSummary> => {
     const response = await apiClient.get(`/attacks/${encodeURIComponent(attackResultId)}`)
+    return response.data
+  },
+
+  updateAttack: async (attackResultId: string, request: UpdateAttackRequest): Promise<AttackSummary> => {
+    const response = await apiClient.patch(`/attacks/${encodeURIComponent(attackResultId)}`, request)
+    return response.data
+  },
+
+  removeHumanScore: async (attackResultId: string): Promise<AttackSummary> => {
+    const response = await apiClient.delete(
+      `/attacks/${encodeURIComponent(attackResultId)}/human-score`
+    )
     return response.data
   },
 
@@ -335,7 +364,10 @@ export const attacksApi = {
     converter_types?: string[]
     converter_types_match?: 'any' | 'all'
     has_converters?: boolean
+    include_scenario_attacks?: boolean
     outcome?: string
+    operator?: string[]
+    operation?: string[]
     label?: string[]
     min_turns?: number
     max_turns?: number
@@ -360,9 +392,28 @@ export const attacksApi = {
   },
 }
 
+export const scoresApi = {
+  createManualScore: async (request: ManualScoreRequest): Promise<BackendScore> => {
+    const response = await apiClient.post('/scores/manual', request)
+    return response.data
+  },
+}
+
 export const labelsApi = {
-  getLabels: async (source: string = 'attacks'): Promise<{ source: string; labels: Record<string, string[]> }> => {
-    const response = await apiClient.get('/labels', { params: { source } })
+  getLabels: async (
+    source: 'attacks' | 'scenarios' = 'attacks',
+    filters?: {
+      operator?: string[]
+      operation?: string[]
+      label?: string[]
+    },
+  ): Promise<LabelOptionsResponse> => {
+    const response = await apiClient.get('/labels', {
+      params: { source, ...filters },
+      paramsSerializer: {
+        indexes: null, // serialize arrays as ?key=val1&key=val2
+      },
+    })
     return response.data
   },
 }
@@ -417,13 +468,39 @@ export const scenariosApi = {
     return response.data
   },
 
+  listRuns: async (params?: {
+    limit?: number
+    cursor?: string
+    scenario_names?: string[]
+    run_statuses?: ScenarioRunState[]
+    label?: string[]
+  }): Promise<ScenarioRunListResponse> => {
+    const response = await apiClient.get('/scenarios/runs', {
+      params,
+      paramsSerializer: {
+        indexes: null,
+      },
+    })
+    return response.data
+  },
+
   getRunProgress: async (
     scenarioResultId: string,
     params?: { since?: string; limit?: number },
+    signal?: AbortSignal,
   ): Promise<ScenarioRunProgress> => {
     const response = await apiClient.get(
       `/scenarios/runs/${encodeURIComponent(scenarioResultId)}/progress`,
-      { params },
+      { params, signal },
+    )
+    return response.data
+  },
+
+  cancelRun: async (scenarioResultId: string, signal?: AbortSignal): Promise<ScenarioRunSummary> => {
+    const response = await apiClient.post(
+      `/scenarios/runs/${encodeURIComponent(scenarioResultId)}/cancel`,
+      undefined,
+      { signal },
     )
     return response.data
   },

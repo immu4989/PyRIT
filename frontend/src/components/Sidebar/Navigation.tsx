@@ -15,10 +15,9 @@ import {
   HistoryRegular,
   PersonFeedbackRegular,
   ScriptRegular,
-  OpenRegular,
+  TargetRegular,
   WeatherMoonRegular,
   WeatherSunnyRegular,
-  TargetRegular,
 } from '@fluentui/react-icons'
 import { useTheme } from '../../hooks/useTheme'
 import type { ThemeMode } from '../../hooks/useTheme'
@@ -28,6 +27,8 @@ export type ViewName =
   | 'home'
   | 'chat'
   | 'history'
+  | 'registry'
+  // Kept as an internal compatibility destination for the unchanged chat pane.
   | 'targets'
   | 'configuration'
   | 'scenarios'
@@ -101,8 +102,8 @@ export default function Navigation({
           data-active={currentView === 'history'}
           appearance="subtle"
           icon={<HistoryRegular />}
-          title="Attack History"
-          aria-label="Attack History"
+          title="History"
+          aria-label="History"
           aria-current={currentView === 'history' ? 'page' : undefined}
           onClick={() => onNavigate('history')}
         />
@@ -111,7 +112,7 @@ export default function Navigation({
           className={styles.navButton}
           data-active={currentView === 'scenarios'}
           appearance="subtle"
-          icon={<ScriptRegular />}
+          icon={<TargetRegular />}
           title="Scanner"
           aria-label="Scanner"
           aria-current={currentView === 'scenarios' ? 'page' : undefined}
@@ -120,13 +121,13 @@ export default function Navigation({
 
         <Button
           className={styles.navButton}
-          data-active={currentView === 'targets'}
+          data-active={currentView === 'registry'}
           appearance="subtle"
-          icon={<TargetRegular />}
-          title="Targets"
-          aria-label="Targets"
-          aria-current={currentView === 'targets' ? 'page' : undefined}
-          onClick={() => onNavigate('targets')}
+          icon={<ScriptRegular />}
+          title="Registry"
+          aria-label="Registry"
+          aria-current={currentView === 'registry' ? 'page' : undefined}
+          onClick={() => onNavigate('registry')}
         />
 
         {canManageConfiguration && (
@@ -154,17 +155,6 @@ export default function Navigation({
         title="Feedback"
         aria-label="Feedback"
         onClick={onOpenFeedback}
-      />
-      <Button
-        as="a"
-        className={styles.navButton}
-        appearance="subtle"
-        icon={<OpenRegular />}
-        title="Security"
-        aria-label="Security"
-        href="https://github.com/microsoft/PyRIT/security/policy"
-        target="_blank"
-        rel="noreferrer"
       />
       <Menu
         checkedValues={{ [THEME_MENU_NAME]: [mode] }}
